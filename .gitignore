@@ -8,6 +8,15 @@ node_modules/
 dist/
 build/
 coverage/
+venv/
+.venv/
+backend/venv/
+.tmp/
+pip-tmp-local/
+.pip-cache/
+.npm-cache/
+storage/
+*.db
 
 .idea/
 .vscode/
