@@ -15,6 +15,9 @@ backend/venv/
 pip-tmp-local/
 .pip-cache/
 .npm-cache/
+desktop/.pip-tmp/
+desktop/piptmp*/
+desktop/wheelhouse/
 storage/
 *.db
 

@@ -5,6 +5,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+from openpyxl.styles import Font, PatternFill
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
@@ -14,7 +16,7 @@ except ImportError:  # pragma: no cover
     xlrd = None
 
 
-SUPPORTED_EXTENSIONS = {".xlsx", ".xls"}
+SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm", ".xls"}
 
 
 @dataclass
@@ -199,6 +201,19 @@ def apply_operations(columns: list[str], rows: list[dict[str, Any]], rules: list
         if action == "drop_columns":
             current_columns = [column for column in current_columns if column not in fields]
             result = [{column: row.get(column) for column in current_columns} for row in result]
+        elif action == "rename_column":
+            old_field = rule.get("old_field")
+            new_field = rule.get("new_field")
+            if old_field in current_columns and new_field:
+                current_columns = [new_field if column == old_field else column for column in current_columns]
+                for row in result:
+                    row[new_field] = row.pop(old_field, None)
+        elif action in ("add_constant_column", "add_empty_column"):
+            field = rule.get("field")
+            if field and field not in current_columns:
+                current_columns.append(field)
+                for row in result:
+                    row[field] = rule.get("value") if action == "add_constant_column" else None
         elif action == "select_columns" and fields:
             current_columns = fields
             result = [{column: row.get(column) for column in current_columns} for row in result]
@@ -329,13 +344,60 @@ def write_excel_formulas(sheet, columns: list[str], row_count: int, rules: list[
         formula = rule.get("excel_formula") or ""
         if not formula:
             continue
-        col_idx = start_col + offset
+        col_idx = columns.index(name) + 1 if name in columns else start_col + offset
         sheet.cell(1, col_idx, name)
         for row_idx in range(2, row_count + 2):
             rendered = formula.replace("{row}", str(row_idx))
             for source_index, column in enumerate(columns, start=1):
                 rendered = rendered.replace("{" + str(column) + "}", f"{get_column_letter(source_index)}{row_idx}")
             sheet.cell(row_idx, col_idx, rendered if rendered.startswith("=") else "=" + rendered)
+
+
+def apply_visual_rules(sheet, columns: list[str], rules: list[dict[str, Any]]) -> None:
+    for rule in rules:
+        action = rule.get("action")
+        if action == "set_column_widths":
+            for field, width in (rule.get("widths") or {}).items():
+                if field in columns:
+                    sheet.column_dimensions[get_column_letter(columns.index(field) + 1)].width = float(width)
+        elif action == "set_row_heights":
+            for row_index, height in (rule.get("heights") or {}).items():
+                sheet.row_dimensions[int(row_index)].height = float(height)
+        elif action == "set_cell_styles":
+            for change in rule.get("changes") or []:
+                field = change.get("field")
+                if field not in columns:
+                    continue
+                row_index = int(change.get("row") or 1)
+                col_index = columns.index(field) + 1
+                style = change.get("style") or {}
+                cell = sheet.cell(row_index, col_index)
+                if style.get("number_format"):
+                    cell.number_format = style["number_format"]
+                if style.get("fill_color"):
+                    cell.fill = PatternFill("solid", fgColor=style["fill_color"])
+                if style.get("font_bold") or style.get("font_color"):
+                    cell.font = Font(bold=bool(style.get("font_bold")), color=style.get("font_color") or None)
+
+
+def apply_chart_rules(sheet, columns: list[str], row_count: int, rules: list[dict[str, Any]]) -> None:
+    for index, rule in enumerate(rules, start=1):
+        if row_count < 1 or not columns:
+            continue
+        chart_type = str(rule.get("chart_kind") or rule.get("chart_type") or "").lower()
+        if "pie" in chart_type:
+            chart = PieChart()
+        elif "line" in chart_type:
+            chart = LineChart()
+        else:
+            chart = BarChart()
+        chart.title = rule.get("name") or f"图表{index}"
+        data = Reference(sheet, min_col=2 if len(columns) > 1 else 1, max_col=min(len(columns), 2), min_row=1, max_row=row_count + 1)
+        chart.add_data(data, titles_from_data=True)
+        if len(columns) > 1:
+            cats = Reference(sheet, min_col=1, min_row=2, max_row=row_count + 1)
+            chart.set_categories(cats)
+        sheet.add_chart(chart, f"{get_column_letter(len(columns) + 2)}{2 + (index - 1) * 15}")
 
 
 def execute_scheme(source_path: str | Path, scheme: dict[str, Any], output_path: str | Path) -> dict[str, Any]:
@@ -350,8 +412,13 @@ def execute_scheme(source_path: str | Path, scheme: dict[str, Any], output_path:
 
     workbook = Workbook()
     workbook.remove(workbook.active)
+    for rule in config.get("workbook_rules") or []:
+        if rule.get("action") == "add_sheet" and rule.get("sheet") and rule.get("sheet") not in workbook.sheetnames:
+            workbook.create_sheet(rule["sheet"])
     detail_sheet = write_sheet(workbook, "明细数据", columns, rows)
     write_excel_formulas(detail_sheet, columns, len(rows), config.get("excel_formula_rules") or [])
+    apply_visual_rules(detail_sheet, columns, config.get("visual_rules") or [])
+    apply_chart_rules(detail_sheet, columns, len(rows), config.get("chart_rules") or [])
     write_sheet(workbook, "汇总数据", summary_columns, summary_rows)
     write_sheet(workbook, "异常数据", ["行号", "字段", "异常名称", "等级", "说明"], [])
     workbook.save(output_path)
